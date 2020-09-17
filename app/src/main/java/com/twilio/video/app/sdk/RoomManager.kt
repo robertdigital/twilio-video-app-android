@@ -18,8 +18,12 @@ import com.twilio.video.app.ui.room.RoomEvent.ParticipantEvent.ParticipantConnec
 import com.twilio.video.app.ui.room.RoomEvent.ParticipantEvent.ParticipantDisconnected
 import com.twilio.video.app.ui.room.VideoService.Companion.startService
 import com.twilio.video.app.ui.room.VideoService.Companion.stopService
-import io.reactivex.Observable
-import io.reactivex.subjects.PublishSubject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.launch
 import timber.log.Timber
 
 const val MICROPHONE_TRACK_NAME = "microphone"
@@ -32,16 +36,18 @@ class RoomManager(
 ) {
 
     private val roomListener = RoomListener()
-    private val roomEventSubject = PublishSubject.create<RoomEvent>()
+    private var roomScope: CoroutineScope? = null
+    private var roomChannel: Channel<RoomEvent>? = null
     var room: Room? = null
-    val roomEvents: Observable<RoomEvent> = roomEventSubject
 
     fun disconnect() {
         room?.disconnect()
     }
 
-    suspend fun connect(identity: String, roomName: String) {
-        roomEventSubject.onNext(Connecting)
+    suspend fun connect(identity: String, roomName: String): ReceiveChannel<RoomEvent> {
+        setupChannel()
+        sendToChannel(Connecting)
+
         room = try {
             videoClient.connect(identity, roomName, roomListener)
         } catch (e: AuthServiceException) {
@@ -49,15 +55,34 @@ class RoomManager(
         } catch (e: Exception) {
             handleTokenException(e)
         }
+
+        return roomChannel as ReceiveChannel<RoomEvent>
     }
 
     fun sendParticipantEvent(participantEvent: ParticipantEvent) {
-        roomEventSubject.onNext(participantEvent)
+        sendToChannel(participantEvent)
+    }
+
+    private fun setupChannel() {
+        check(roomScope == null && roomChannel == null)
+        roomScope = CoroutineScope(Dispatchers.IO)
+        roomChannel = Channel(Channel.BUFFERED)
+    }
+
+    private fun sendToChannel(roomEvent: RoomEvent) {
+        roomScope?.launch { roomChannel?.send(roomEvent) }
+    }
+
+    private fun teardownChannel() {
+        roomScope?.cancel()
+        roomChannel?.close()
+        roomScope = null
+        roomChannel = null
     }
 
     private fun handleTokenException(e: Exception, error: AuthServiceError? = null): Room? {
         Timber.e(e, "Failed to retrieve token")
-        roomEventSubject.onNext(RoomEvent.TokenError(serviceError = error))
+        sendToChannel(RoomEvent.TokenError(serviceError = error))
         return null
     }
 
@@ -77,7 +102,8 @@ class RoomManager(
 
             stopService(context)
 
-            roomEventSubject.onNext(Disconnected)
+            sendToChannel(Disconnected)
+            teardownChannel()
         }
 
         override fun onConnectFailure(room: Room, twilioException: TwilioException) {
@@ -87,7 +113,7 @@ class RoomManager(
                     room.state,
                     twilioException.code,
                     twilioException.message)
-            roomEventSubject.onNext(ConnectFailure)
+            sendToChannel(ConnectFailure)
         }
 
         override fun onParticipantConnected(room: Room, remoteParticipant: RemoteParticipant) {
@@ -109,7 +135,7 @@ class RoomManager(
             Timber.i("DominantSpeakerChanged -> room sid: %s, remoteParticipant: %s",
                     room.sid, remoteParticipant?.sid)
 
-            roomEventSubject.onNext(DominantSpeakerChanged(remoteParticipant?.sid))
+            sendToChannel(DominantSpeakerChanged(remoteParticipant?.sid))
         }
 
         override fun onRecordingStarted(room: Room) {}
@@ -135,7 +161,7 @@ class RoomManager(
                     participants.add(it)
                 }
 
-                roomEventSubject.onNext(Connected(participants, room, room.name))
+                sendToChannel(Connected(participants, room, room.name))
             }
         }
     }

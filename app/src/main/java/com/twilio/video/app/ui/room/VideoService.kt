@@ -41,12 +41,6 @@ class VideoService(
     override fun onCreate() {
         AndroidInjection.inject(this)
         super.onCreate()
-
-        rxDisposables + roomManager.roomEvents.subscribe({
-            observeRoomEvents(it)
-        }, {
-            Timber.e(it, "Error in RoomManager RoomEvent stream")
-        })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
